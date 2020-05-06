@@ -1,0 +1,307 @@
+void err_quit(const char *msg)// 소켓 함수 오류 출력 후 종료 -> Critical Error
+{
+	LPVOID lpMsgBuf;//오류 메시지의 포인터를 받아올 변수
+	FormatMessage
+	(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+		NULL, WSAGetLastError(),//가장 최근의 오류 받아옴
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),//언어 설정
+		(LPTSTR)&lpMsgBuf, 0, NULL//lpMsgBuf에 저장
+	);
+	MessageBox(NULL, (LPCTSTR)lpMsgBuf, msg, MB_ICONERROR);//메세지 창으로 
+	LocalFree(lpMsgBuf);//변수 해제
+	exit(1);//강제종료 함수
+}
+=================================================================================================
+// 소켓 함수 오류 출력 -> Error긴 하나 Critical 까진 아닐때
+void err_display(const char *msg)
+{
+	LPVOID lpMsgBuf;
+	FormatMessage
+	(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+		NULL, WSAGetLastError(),
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPTSTR)&lpMsgBuf, 0, NULL
+	);
+	printf("[%s] %s", msg, (char *)lpMsgBuf);//실행창에 출력만 해둠
+	LocalFree(lpMsgBuf);
+}
+=======================================================================================================
+// 사용자 정의 데이터 수신 함수
+int recvn(SOCKET s, char *buf, int len, int flags)//input 변수가 대부분이나 buf 경우 포인터를 제공해 data를 받아옴
+{
+	int received;//받아온 데이터 바이트 수
+	char *ptr = buf;//받아올 데이터 저장될 메모리 공간의 포인터
+	int left = len;//남은 빈 메모리
+
+	while (left > 0) {//메모리가 비어있을 동안 반복
+		received = recv(s, ptr, left, flags);//recieved 만큼 데이터를 받아온다
+		if (received == SOCKET_ERROR)
+			return SOCKET_ERROR;//소켓에러의 경우 리턴값으로 소켓 에러를 출력하고 종료
+		else if (received == 0)//아무것도 받아오지 않았다면 반복종료
+			break;
+		left -= received;//받아온 만큼 남은 빈 메모리 공간에서 뺀다
+		ptr += received;//다음 데이터가 시작되는 메모리 포인터로 지정되게 한다
+	}
+
+	return (len - left);//데이터 받아온 양의 총 합을 리턴
+}
+============================================================================================================
+bool PacketRecv(SOCKET _sock, char *_buf)
+{
+	int size;
+
+	int retval = recvn(_sock, (char*)&size, sizeof(size), 0);
+	if (retval == SOCKET_ERROR)
+	{
+		err_display("recv error()");
+		return false;
+	}
+	else if (retval == 0)
+	{
+		return false;
+	}
+
+	retval = recvn(_sock, _buf, size, 0);
+	if (retval == SOCKET_ERROR)
+	{
+		err_display("recv error()");
+		return false;
+	}
+	else if (retval == 0)
+	{
+		return false;
+	}
+
+	return true;
+}
+===============================================================================================================
+PROTOCOL GetProtocol(char *_ptr)
+{
+	PROTOCOL protocol;
+	memcpy(&protocol, _ptr, sizeof(PROTOCOL));
+
+	return protocol;
+}
+=======================================================================================================================
+int PackPacket(char* _buf, PROTOCOL _protocol, const char* _str1)
+{
+	int size = 0;
+	char *ptr = _buf;
+	int strsize1 = strlen(_str1);
+
+	ptr = ptr + sizeof(size);
+
+	memcpy(ptr, &_protocol, sizeof(_protocol));
+	ptr = ptr + sizeof(_protocol);
+	size = size + sizeof(_protocol);
+
+	memcpy(ptr, &strsize1, sizeof(strsize1));
+	ptr = ptr + sizeof(strsize1);
+	size = size + sizeof(strsize1);
+
+	memcpy(ptr, _str1, strsize1);
+	ptr = ptr + strsize1;
+	size = size + strsize1;
+
+	ptr = _buf;
+	memcpy(ptr, &size, sizeof(size));
+
+	size = size + sizeof(size);
+
+	return size;
+}
+==========================================================================================================================
+int PackPacket(char* _buf, PROTOCOL _protocol, RESULT _result, const char* _str1)
+{
+	int size = 0;
+	char *ptr = _buf;
+	int strsize1 = strlen(_str1);
+
+	ptr = ptr + sizeof(size);
+
+	memcpy(ptr, &_protocol, sizeof(_protocol));
+	ptr = ptr + sizeof(_protocol);
+	size = size + sizeof(_protocol);
+
+	memcpy(ptr, &_result, sizeof(_result));
+	ptr = ptr + sizeof(_result);
+	size = size + sizeof(_result);
+
+	memcpy(ptr, &strsize1, sizeof(strsize1));
+	ptr = ptr + sizeof(strsize1);
+	size = size + sizeof(strsize1);
+
+
+	memcpy(ptr, _str1, strsize1);
+	ptr = ptr + strsize1;
+	size = size + strsize1;
+
+	ptr = _buf;
+	memcpy(ptr, &size, sizeof(size));
+
+	size = size + sizeof(size);
+
+	return size;
+}
+==========================================================================================================
+void UnPackPacket(char* _buf, char* _str1, char* _str2)
+{
+	char *ptr = _buf;
+	int str1size = 0;
+	int str2size = 0;
+	ptr += sizeof(PROTOCOL);
+	memcpy(&str1size, ptr, sizeof(int));
+	ptr += sizeof(int);
+	memcpy(_str1, ptr, str1size);
+	ptr += str1size;
+	memcpy(&str2size, ptr, sizeof(int));
+	ptr += sizeof(int);
+	memcpy(_str2, ptr, str2size);
+	ptr += str2size;
+}
+==============================================================================================================
+_ClientInfo* AddClientInfo(SOCKET _sock, SOCKADDR_IN _addr)
+{
+	_ClientInfo* ptr = new _ClientInfo;
+	ZeroMemory(ptr, sizeof(_ClientInfo));
+	ptr->sock = _sock;
+	memcpy(&ptr->addr, &_addr, sizeof(SOCKADDR_IN));
+
+	ClientInfo[count++] = ptr;
+
+	printf("\n[TCP 서버] 클라이언트 접속: IP 주소=%s, 포트 번호=%d\n",
+		inet_ntoa(ptr->addr.sin_addr), ntohs(ptr->addr.sin_port));//구조체안에는 network 바이트 형식이므로 변환
+
+	return ptr;
+}
+=============================================================================================================
+void RemoveClient(_ClientInfo *ptr)
+{
+	printf("[TCP 서버] 클라이언트 종료: IP 주소=%s, 포트 번호=%d\n",
+		inet_ntoa(ptr->addr.sin_addr), ntohs(ptr->addr.sin_port));//연결 끊긴 클라의 정보 표시
+	for (int i = 0; i < count; i++)
+	{
+		if (ClientInfo[i] == ptr)
+		{
+			closesocket(ptr->sock);
+			delete ClientInfo[i];
+
+			for (int j = i; j < count - 1; j++)
+			{
+				ClientInfo[j] = ClientInfo[j + 1];
+			}
+			break;
+		}
+	}
+}
+===================================================================================================================
+// 현재 디렉토리에서 파일 존재 여부를 확인한다.
+BOOL SearchFile(char *filename)
+{
+	WIN32_FIND_DATA FindFileData;
+	HANDLE hFindFile = FindFirstFile(filename, &FindFileData);
+	if (hFindFile == INVALID_HANDLE_VALUE)
+		return FALSE;
+	else {
+		FindClose(hFindFile);
+		return TRUE;
+	}
+}//파일을 찾지 못할경우 false 리턴
+===================================================================================================
+DWORD WINAPI ProcessClient(LPVOID arg)
+{
+	int retval;
+	_ClientInfo* ptr = (_ClientInfo *)arg;
+	while (1)
+	{
+		int size = PackPacket(ptr->buf, INTRO, INTRO_MSG);
+		retval = send(ptr->sock, ptr->buf, size, 0);
+		if (retval == SOCKET_ERROR) {
+			err_display("send()");
+			break;
+		}
+
+		if (!PacketRecv(ptr->sock, ptr->buf))
+		{
+			break;
+		}
+
+		PROTOCOL protocol = GetProtocol(ptr->buf);
+
+		RESULT login_result = NODATA;
+		char msg[BUFSIZE];
+
+		switch (protocol)
+		{
+		case LOGIN_INFO:
+			memset(&ptr->login_info, 0, sizeof(_LoginInfo));
+
+			UnPackPacket(ptr->buf, ptr->login_info.id, ptr->login_info.pw);
+			for (int i = 0; i < 3; i++)
+			{
+				if (!strcmp(LoginInfo[i].id, ptr->login_info.id))
+				{
+					if (!strcmp(LoginInfo[i].pw, ptr->login_info.pw))
+					{
+						login_result = LOGIN_SUCCESS;
+						strcpy(msg, LOGIN_SUCCESS_MSG);
+					}
+					else
+					{
+						login_result = PW_ERROR;
+						strcpy(msg, PW_ERROR_MSG);
+					}
+					break;
+				}
+			}
+
+			if (login_result == NODATA)
+			{
+				login_result = ID_ERROR;
+				strcpy(msg, ID_ERROR_MSG);
+			}
+
+			protocol = LOGIN_RESULT;
+
+			size = PackPacket(ptr->buf, protocol, login_result, msg);
+
+			retval = send(ptr->sock, ptr->buf, size, 0);
+			if (retval == SOCKET_ERROR) {
+				err_display("send()");
+				break;
+			}
+		}//end switch case
+
+		if (login_result == LOGIN_SUCCESS)
+		{
+			break;
+		}
+	}
+
+	closesocket(ptr->sock);
+	RemoveClientInfo(ptr);
+
+	return 0;
+}//쓰레드에게 배당할 함수
+==============================================================================
+HANDLE hThread;
+hThread = CreateThread(NULL, 0, ProcessClient, (LPVOID)ptr, 0, NULL);//쓰레드 생성
+		/*
+1번 인자 : LPSECURITY_ATTRIBUTES lpThreadAttributes - 생성되는 쓰레드 보안 값(NULL은 디폴트)
+2번 인자 : SIZE_T dwStackSize - 쓰레드만의 독점적 스택 크기 설정(0은 디폴트)
+3번 인자 : LPTHREAD_START_ROUTINE lpStartAddress - 쓰레드로 호출되는 함수의 포인터
+4번 인자 : LPVOID lpParameter - 함수에 전달할 인자값
+5번 인자 : DWORD dwCreateionFlags - 쓰레드를 CPU 대기열 진입(READY)/WAIT 상태 결정(0/CREATE_SUSPEND)
+6번 인자 : LPDWORD lpThreadId - 쓰레드 ID 값 전달용 output 인자
+		*/
+if (hThread == NULL)//실패시
+{
+	closesocket(client_sock);//해당 쓰레드에 배당한 소켓 닫기
+}
+else//성공시
+{
+	CloseHandle(hThread);//핸들 놓아줌
+}
+=========================================================================
