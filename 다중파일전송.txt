@@ -1,0 +1,1249 @@
+//클라이언트 파일
+#pragma comment(lib, "ws2_32.lib")
+#include <winsock2.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define BUFSIZE 4096
+#define MAX_FILE_READ_SIZE 2048
+#define FILENAMESIZE 256
+#define MAXCONCLIENT 100
+
+enum PROTOCOL
+{
+	INTRO = 1,
+	FILE_INFO,
+	FILE_TRANS_DENY,
+	FILE_TRANS_INFO,
+	FILE_TRANS_START_POINT,
+	FILE_TRANS_DATA
+};
+
+enum DENY_CODE
+{
+	FILE_EXIST = -1,
+	FILE_SIZE_ERROR = -2,
+};
+
+enum FILE_TRANS_INFO_CODE
+{
+	FILE_TRANS_WAIT = 1,
+	FILE_TRANS_RESTART
+};
+
+struct _File_info
+{
+	char filename[FILENAMESIZE];
+	int  filesize;
+	int  nowsize;
+}Fileinfo;
+
+
+void err_quit(const char *msg);
+void err_display(const char *msg);
+int recvn(SOCKET s, char *buf, int len, int flags);
+
+bool PacketRecv(SOCKET, char*);
+
+int PackPacket(char* _buf, PROTOCOL _protocol, const char* _str1, int _data);
+int PackPacket(char*, PROTOCOL,int, const char*);
+
+PROTOCOL GetProtocol(const char*);
+
+void UnPackPacket(const char*, int&, char*);
+void UnPackPacket(const char*, char*);
+void UnPackPacket(const char*, int&);
+
+int main(int argc, char* argv[])
+{
+	int retval;
+	char buf[BUFSIZE];
+	
+	// 윈속 초기화
+	WSADATA wsa;
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+		return -1;
+
+	// socket()
+	SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (sock == INVALID_SOCKET) err_quit("socket()");
+
+	// connect()
+	SOCKADDR_IN serveraddr;
+	ZeroMemory(&serveraddr, sizeof(serveraddr));
+	serveraddr.sin_family = AF_INET;
+	serveraddr.sin_port = htons(9000);
+	serveraddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+	retval = connect(sock, (SOCKADDR *)&serveraddr, sizeof(serveraddr));
+	if (retval == SOCKET_ERROR) err_quit("connect()");
+
+	ZeroMemory(&Fileinfo, sizeof(Fileinfo));
+		
+	FILE* fp = nullptr;	
+	bool endflag = false;
+
+	while (1)
+	{
+		if (!PacketRecv(sock, buf))
+		{
+			break;
+		}
+
+		PROTOCOL protocol=GetProtocol(buf);
+
+		switch (protocol)
+		{
+		case INTRO:		
+			{				
+				char msg[BUFSIZE];	
+				memset(msg, 0, sizeof(msg));
+				UnPackPacket(buf, msg);
+				printf("%s\n", msg);
+
+				strcpy(Fileinfo.filename, argv[1]);
+
+				fp = fopen(Fileinfo.filename, "rb");
+				if (!fp)
+				{
+					err_quit("fopen");
+				}
+
+				fseek(fp, 0, SEEK_END);
+				Fileinfo.filesize = ftell(fp);
+				fclose(fp);
+
+				int size=PackPacket(buf, FILE_INFO, Fileinfo.filename, Fileinfo.filesize);
+
+				retval = send(sock, buf, size, 0);
+				if (retval == SOCKET_ERROR)
+				{
+					err_quit("file info send()");
+				}
+			}
+
+			break;
+		case FILE_TRANS_DENY:
+			{
+				char msg[BUFSIZE];
+				int deny_code;
+				memset(msg, 0, sizeof(msg));
+				UnPackPacket(buf, deny_code, msg);
+				switch (deny_code)
+				{
+				case FILE_EXIST:
+					printf("%s\n", msg);
+					endflag = true;
+					break;
+				case FILE_SIZE_ERROR:
+					printf("%s\n", msg);
+					endflag = true;
+					break;
+				}
+			}
+			
+			break;
+		case FILE_TRANS_INFO:
+			{
+				char msg[BUFSIZE];
+				memset(msg, 0, sizeof(msg));
+				int info;
+				UnPackPacket(buf, info, msg);
+				switch (info)
+				{
+				case FILE_TRANS_WAIT:
+					printf("%s\n", msg);					
+					break;
+				case FILE_TRANS_RESTART:
+					printf("%s\n", msg);	
+					{
+						int size = PackPacket(buf, FILE_INFO, Fileinfo.filename, Fileinfo.filesize);
+
+						retval = send(sock, buf, size, 0);
+						if (retval == SOCKET_ERROR)
+						{
+							err_quit("file info send()");
+						}
+					}					
+					break;
+				}
+			}
+			break;
+		case FILE_TRANS_START_POINT:
+			{				
+				UnPackPacket(buf, Fileinfo.nowsize);
+
+				fp = fopen(Fileinfo.filename, "rb");
+				fseek(fp, Fileinfo.nowsize, SEEK_SET);
+
+				while (1)
+				{
+					char rbuf[BUFSIZE];
+					int trans_size = fread(rbuf, 1, MAX_FILE_READ_SIZE, fp);
+					if (trans_size > 0)
+					{
+						int size=PackPacket(buf, FILE_TRANS_DATA, trans_size, rbuf);
+						retval = send(sock, buf, size, 0);
+						if (retval == SOCKET_ERROR)
+						{
+							err_display("send()");
+							break;
+						}
+						Fileinfo.nowsize += trans_size;
+						printf("..");
+						Sleep(500);
+					}
+					else if (trans_size == 0 && Fileinfo.nowsize == Fileinfo.filesize)
+					{
+						printf("파일 전송 완료!: %d 바이트\n", Fileinfo.filesize);
+						endflag = true;
+						break;
+					}
+					else
+					{
+						perror("파일 입출력 오류");
+						break;
+					}
+				}
+
+				fclose(fp);
+
+			}			
+			break;
+		
+		}
+
+		if (endflag)
+		{
+			break;
+		}
+	}
+	// closesocket()
+	closesocket(sock);
+
+	// 윈속 종료
+	WSACleanup();
+	system("pause");
+	return 0;
+}
+
+// 소켓 함수 오류 출력 후 종료
+void err_quit(const char *msg)
+{
+	LPVOID lpMsgBuf;
+	FormatMessage(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER |
+		FORMAT_MESSAGE_FROM_SYSTEM,
+		NULL, WSAGetLastError(),
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPTSTR)&lpMsgBuf, 0, NULL);
+	MessageBox(NULL, (LPCTSTR)lpMsgBuf, msg, MB_ICONERROR);
+	LocalFree(lpMsgBuf);
+	exit(-1);
+}
+
+// 소켓 함수 오류 출력
+void err_display(const char *msg)
+{
+	LPVOID lpMsgBuf;
+	FormatMessage(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER |
+		FORMAT_MESSAGE_FROM_SYSTEM,
+		NULL, WSAGetLastError(),
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPTSTR)&lpMsgBuf, 0, NULL);
+	printf("[%s] %s", msg, (LPCTSTR)lpMsgBuf);
+	LocalFree(lpMsgBuf);
+}
+
+
+// 사용자 정의 데이터 수신 함수
+int recvn(SOCKET s, char *buf, int len, int flags)
+{
+	int received;
+	char *ptr = buf;
+	int left = len;
+
+	while (left > 0) {
+		received = recv(s, ptr, left, flags);
+		if (received == SOCKET_ERROR)
+			return SOCKET_ERROR;
+		else if (received == 0)
+			break;
+		left -= received;
+		ptr += received;
+	}
+
+	return (len - left);
+}
+
+int PackPacket(char* _buf, PROTOCOL _protocol, const char* _str1, int _data)
+{
+	char* ptr = _buf;
+	int strsize = strlen(_str1);
+	int size = 0;
+
+	ptr = ptr + sizeof(size);
+
+	memcpy(ptr, &_protocol, sizeof(_protocol));
+	ptr = ptr + sizeof(_protocol);
+	size = size + sizeof(_protocol);
+
+	memcpy(ptr, &strsize, sizeof(strsize));
+	ptr = ptr + sizeof(strsize);
+	size = size + sizeof(strsize);
+
+	memcpy(ptr, _str1, strsize);
+	ptr = ptr + strsize;
+	size = size + strsize;
+
+	memcpy(ptr, &_data, sizeof(_data));
+	ptr = ptr + sizeof(_data);
+	size = size + sizeof(_data);
+
+	ptr = _buf;
+
+	memcpy(ptr, &size, sizeof(size));
+
+	size = size + sizeof(size);
+
+	return size;
+}
+
+int PackPacket(char* _buf, PROTOCOL _protocol, int _datasize, const char* _filedata)
+{
+	char* ptr = _buf;
+	int size = 0;
+
+	ptr = ptr + sizeof(size);
+
+	memcpy(ptr, &_protocol, sizeof(_protocol));
+	ptr = ptr + sizeof(_protocol);
+	size = size + sizeof(_protocol);
+
+	memcpy(ptr, &_datasize, sizeof(_datasize));
+	ptr = ptr + sizeof(_datasize);
+	size = size + sizeof(_datasize);
+
+	memcpy(ptr, _filedata, _datasize);
+	ptr = ptr + _datasize;
+	size = size + _datasize;
+
+	ptr = _buf;
+	
+	memcpy(ptr, &size, sizeof(size));
+
+	size = size + sizeof(size);
+
+	return size;
+}
+
+PROTOCOL GetProtocol(const char* _buf)
+{
+	PROTOCOL protocol;
+	memcpy(&protocol, _buf, sizeof(PROTOCOL));
+	return protocol;
+}
+
+void UnPackPacket(const char* _buf, int& _data, char* _str)
+{
+	const char* ptr = _buf;
+	int strsize;
+
+	ptr = ptr + sizeof(PROTOCOL);
+
+	memcpy(&_data, ptr, sizeof(_data));
+	ptr = ptr + sizeof(_data);
+	
+	memcpy(&strsize, ptr, sizeof(strsize));
+	ptr = ptr + sizeof(strsize);
+
+	memcpy(_str, ptr, strsize);
+}
+
+void UnPackPacket(const char* _buf, char* _str)
+{
+	const char* ptr = _buf;
+	int strsize;
+
+	ptr = ptr + sizeof(PROTOCOL);
+
+	memcpy(&strsize, ptr, sizeof(strsize));
+	ptr = ptr + sizeof(strsize);
+
+	memcpy(_str, ptr, strsize);
+}
+
+void UnPackPacket(const char* _buf, int& _data)
+{
+	const char* ptr = _buf + sizeof(PROTOCOL);
+
+	memcpy(&_data, ptr, sizeof(_data));
+}
+
+bool PacketRecv(SOCKET _sock, char* _buf)
+{
+	int size;
+
+	int retval = recvn(_sock, (char*)&size, sizeof(size), 0);
+	if (retval == SOCKET_ERROR)
+	{
+		err_display("gvalue recv error()");
+		return false;
+	}
+	else if (retval == 0)
+	{
+		return false;
+	}
+
+	retval = recvn(_sock, _buf, size, 0);
+	if (retval == SOCKET_ERROR)
+	{
+		err_display("gvalue recv error()");
+		return false;
+
+	}
+	else if (retval == 0)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+//서버
+
+#pragma comment(lib, "ws2_32.lib")
+#include <winsock2.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define BUFSIZE 4096
+#define FILENAMESIZE 256
+#define MAXFILESIZE 10000000
+#define MAXCONCLIENT 100
+
+#define INTRO_MSG "전송할 파일명을 입력하세요"
+#define FILE_EXIST_MSG "전송하고자 하는 파일은 이미 서버에 존재하는 파일입니다."
+#define FILE_SIZE_ERROR_MSG "전송하고자 하는 파일은 용량이 너무 큽니다."
+#define FILE_TRANS_WAIT_MSG "다른 Sender가 전송중인 파일입니다. 잠시 결과를 기다리십시오"
+#define FILE_TRANS_RESTART_MSG "다시 전송 시도"
+enum PROTOCOL 
+{ 
+	INTRO=1, 
+	FILE_INFO, 
+	FILE_TRANS_DENY, 
+	FILE_TRANS_INFO,
+	FILE_TRANS_START_POINT, 
+	FILE_TRANS_DATA 
+};
+
+enum STATE
+{
+	INIT_STATE=1, 
+	INTRO_STATE, 	
+	FILE_TRANS_INFO_STATE, 
+	FILE_TRANS_DATA_STATE,
+	FILE_TRANS_WAIT_STATE, 
+	FILE_TRANS_END_STATE,	
+	DISCONNETED_STATE
+};
+
+enum DENY_CODE
+{
+	FILE_EXIST = -1,
+	FILE_SIZE_ERROR=-2,
+};
+
+enum FILE_TRANS_INFO_CODE
+{
+	FILE_TRANS_WAIT=1,
+	FILE_TRANS_RESTART
+};
+
+struct _File_info
+{
+	char filename[FILENAMESIZE];
+	int  filesize;	
+	int  nowsize;
+};
+
+
+struct _ClientInfo
+{
+	SOCKET sock;
+	SOCKADDR_IN addr;
+	STATE state;
+	HANDLE hwait_event;
+	HANDLE hthread;
+	_File_info  file_info;
+	bool file_trans;
+	char packetbuf[BUFSIZE];
+};
+
+void err_quit(const char*);
+void err_display(const char*);
+
+int recvn(SOCKET, char*, int, int);
+
+_ClientInfo* AddClientInfo(SOCKET sock, SOCKADDR_IN addr);
+void ReMoveClientInfo(_ClientInfo*);
+
+bool AddThread(LPTHREAD_START_ROUTINE process, _ClientInfo* _ptr);
+void RemoveThread(_ClientInfo* _ptr);
+
+_ClientInfo* SearchClientInfo(SOCKET _sock);
+_ClientInfo* SearchClientInfo(HANDLE _hThread);
+_ClientInfo* SearchClientInfo(char* _filename);
+
+bool SearchFile(const char*);
+
+bool PacketRecv(SOCKET, char*);
+
+PROTOCOL GetProtocol(const char*);
+
+int PackPacket(char*, PROTOCOL, const char*);
+int PackPacket(char*, PROTOCOL, int, const char*);
+int PackPacket(char*, PROTOCOL, int);
+
+void UnPackPacket(const char* _buf, char* _str1, int& _data1);
+void UnPackPacket(const char*, int&, char*);
+
+_ClientInfo* ClientInfo[MAXCONCLIENT];
+int Count;
+
+HANDLE hThread[MAXCONCLIENT];
+int ThreadCount = 0;
+
+CRITICAL_SECTION cs;
+
+DWORD WINAPI ProcessClient(LPVOID);
+DWORD CALLBACK WaitClient(LPVOID);
+
+void WakeUpWaitClient(_ClientInfo* _ptr);
+
+int main(int argc, char* argv[])
+{
+	int retval;
+
+	// 윈속 초기화
+	WSADATA wsa;
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+		return -1;
+
+	InitializeCriticalSection(&cs);
+
+	// socket()
+	SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (listen_sock == INVALID_SOCKET) err_quit("socket()");
+
+	// bind()
+	SOCKADDR_IN serveraddr;
+	ZeroMemory(&serveraddr, sizeof(serveraddr));
+	serveraddr.sin_family = AF_INET;
+	serveraddr.sin_port = htons(9000);
+	serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	retval = bind(listen_sock, (SOCKADDR *)&serveraddr, sizeof(serveraddr));
+	if (retval == SOCKET_ERROR) err_quit("bind()");
+
+	// listen()
+	retval = listen(listen_sock, SOMAXCONN);
+	if (retval == SOCKET_ERROR) err_quit("listen()");
+
+	// 데이터 통신에 사용할 변수
+
+	SOCKET client_sock;
+	SOCKADDR_IN clientaddr;
+	int addrlen;
+	
+	
+	char buf[BUFSIZE];
+	FILE *fp=nullptr;
+
+	hThread[ThreadCount++] = CreateEvent(nullptr, false, false, nullptr);
+
+	CreateThread(nullptr, 0, WaitClient, nullptr, 0, nullptr);
+
+	while (1)
+	{
+		addrlen = sizeof(clientaddr);
+		client_sock = accept(listen_sock, (SOCKADDR *)&clientaddr, &addrlen);
+		if (client_sock == INVALID_SOCKET) {
+			err_display("accept()");
+			continue;
+		}	
+
+		_ClientInfo* ptr = AddClientInfo(client_sock, clientaddr);		
+
+		if (!AddThread(ProcessClient, ptr))
+		{
+			ReMoveClientInfo(ptr);
+			continue;
+		}
+
+		SetEvent(hThread[0]);
+	}//outer while end
+
+	 // closesocket()
+	closesocket(listen_sock);
+	
+	DeleteCriticalSection(&cs);
+	// 윈속 종료
+	WSACleanup();
+	return 0;
+}
+
+DWORD WINAPI ProcessClient(LPVOID _ptr)
+{
+	_ClientInfo* ptr = (_ClientInfo*)_ptr;
+	int retval;
+	int size;
+	bool fileflag = false;
+	FILE* fp = nullptr;
+	PROTOCOL protocol;
+
+	while (1)
+	{
+		bool end_flag = false;
+
+		switch (ptr->state)
+		{
+		case INIT_STATE:
+			ptr->state = INTRO_STATE;
+			break;
+		case INTRO_STATE:
+			size = PackPacket(ptr->packetbuf, INTRO, INTRO_MSG);
+			retval = send(ptr->sock, ptr->packetbuf, size, 0);
+			if (retval == SOCKET_ERROR)
+			{
+				err_display("send()");
+				ptr->state = DISCONNETED_STATE;						
+				break;
+			}
+			ptr->state = FILE_TRANS_INFO_STATE;
+			break;
+		case FILE_TRANS_INFO_STATE:
+			if (!PacketRecv(ptr->sock, ptr->packetbuf))
+			{
+				ptr->state = DISCONNETED_STATE;
+				break;
+			}
+
+			protocol = GetProtocol(ptr->packetbuf);
+
+			switch (protocol)
+			{
+			case FILE_INFO:
+				{
+					char filename[FILENAMESIZE];
+					int filesize;
+					memset(filename, 0, sizeof(filename));
+
+					UnPackPacket(ptr->packetbuf, filename, filesize);
+
+					printf("-> 받을 파일 이름: %s\n", filename);
+					printf("-> 받을 파일 크기: %d\n", filesize);
+
+					if (filesize == MAXFILESIZE)
+					{
+						printf("전송 파일 사이즈 초과\n");
+
+						int size = PackPacket(ptr->packetbuf, FILE_TRANS_DENY, FILE_SIZE_ERROR, FILE_SIZE_ERROR_MSG);
+
+						retval = send(ptr->sock, ptr->packetbuf, size, 0);
+						if (retval == SOCKET_ERROR)
+						{
+							err_display("send()");
+							ptr->state = DISCONNETED_STATE;
+						}
+
+						return 0;
+					}
+
+					EnterCriticalSection(&cs);
+
+					if (SearchFile(filename))
+					{
+						FILE* fp = fopen(filename, "rb");
+						fseek(fp, 0, SEEK_END);
+						int fsize = ftell(fp);
+						fclose(fp);
+						if (filesize == fsize)
+						{
+							LeaveCriticalSection(&cs);
+
+							printf("존재하는 파일 전송 요구\n");
+
+							int size = PackPacket(ptr->packetbuf, FILE_TRANS_DENY, FILE_EXIST, FILE_EXIST_MSG);
+
+							retval = send(ptr->sock, ptr->packetbuf, size, 0);
+							if (retval == SOCKET_ERROR)
+							{
+								err_display("send()");
+								ptr->state = DISCONNETED_STATE;
+							}
+
+							return 0;
+						}
+
+						_ClientInfo* temp = SearchClientInfo(filename);
+
+						if (temp != nullptr && temp != ptr)
+						{
+							strcpy(ptr->file_info.filename, filename);
+							ptr->state = FILE_TRANS_WAIT_STATE;
+							LeaveCriticalSection(&cs);							
+							break;
+						}
+						else
+						{
+							strcpy(ptr->file_info.filename, filename);
+							ptr->file_info.filesize = filesize;
+							ptr->file_info.nowsize = fsize;
+						}
+					}
+					else
+					{
+						strcpy(ptr->file_info.filename, filename);
+						ptr->file_info.filesize = filesize;
+						ptr->file_info.nowsize = 0;
+					}
+
+					int size = PackPacket(ptr->packetbuf, FILE_TRANS_START_POINT, ptr->file_info.nowsize);
+
+					retval = send(ptr->sock, ptr->packetbuf, size, 0);
+					if (retval == SOCKET_ERROR)
+					{
+						err_display("send()");
+						ptr->state = DISCONNETED_STATE;
+						break;
+					}
+
+					fileflag = true;
+					ptr->file_trans = true;
+					fp = fopen(ptr->file_info.filename, "ab");
+					LeaveCriticalSection(&cs);
+					ptr->state = FILE_TRANS_DATA_STATE;
+				}
+			}			
+			break;				
+		case FILE_TRANS_DATA_STATE:
+			while (1)
+			{
+				if (!PacketRecv(ptr->sock, ptr->packetbuf))
+				{					
+					break;
+				}
+				protocol = GetProtocol(ptr->packetbuf);
+
+				switch (protocol)
+				{
+				case FILE_TRANS_DATA:
+					{
+						int transsize;
+						char buf[BUFSIZE];
+						UnPackPacket(ptr->packetbuf, transsize, buf);
+						fwrite(buf, 1, transsize, fp);
+						if (ferror(fp)) {
+							perror("파일 입출력 오류");
+							break;
+						}
+						ptr->file_info.nowsize += transsize;
+					}
+				break;
+				}
+			}			
+			ptr->state = FILE_TRANS_END_STATE;
+			break;
+		case FILE_TRANS_WAIT_STATE:
+			size = PackPacket(ptr->packetbuf, FILE_TRANS_INFO, FILE_TRANS_WAIT, FILE_TRANS_WAIT_MSG);
+
+			retval = send(ptr->sock, ptr->packetbuf, size, 0);
+			if (retval == SOCKET_ERROR)
+			{
+				err_display("send()");
+				ptr->state = DISCONNETED_STATE;
+				break;
+			}
+
+			WaitForSingleObject(ptr->hwait_event, INFINITE);
+
+			size = PackPacket(ptr->packetbuf, FILE_TRANS_INFO, FILE_TRANS_RESTART, FILE_TRANS_RESTART_MSG);
+			retval = send(ptr->sock, ptr->packetbuf, size, 0);
+			if (retval == SOCKET_ERROR)
+			{
+				err_display("send()");
+				ptr->state = DISCONNETED_STATE;
+				break;
+			}
+			ptr->state = FILE_TRANS_INFO_STATE;
+			break;
+		case FILE_TRANS_END_STATE:
+			if (fileflag && fp != nullptr)
+			{
+				fclose(fp);
+			}
+
+			if (ptr->file_info.filesize != 0 && ptr->file_info.filesize == ptr->file_info.nowsize)
+			{
+				printf("전송완료!!\n");
+			}
+			else
+			{
+				printf("전송실패!!\n");
+			}
+			ptr->file_trans = false;
+			end_flag = true;
+			break;
+		case DISCONNETED_STATE:
+			ptr->file_trans = false;
+			end_flag = true;
+			break;			
+		}
+
+		if (end_flag)
+		{
+			break;
+		}
+	}
+
+	return 0;
+}
+
+DWORD CALLBACK WaitClient(LPVOID)
+{
+	int index;
+	int retval;
+
+	while (1)
+	{
+		retval = WaitForMultipleObjects(ThreadCount, hThread, false, INFINITE);
+
+		index = retval - WAIT_OBJECT_0;
+
+		DWORD threadid;
+
+		if (index == 0)
+		{		
+			continue;
+		}
+
+		printf("쓰레드 종료\n");
+
+		EnterCriticalSection(&cs);
+
+		_ClientInfo* ptr = SearchClientInfo(hThread[index]);
+
+		switch (ptr->state)
+		{
+		case INIT_STATE:
+			RemoveThread(ptr);
+			ReMoveClientInfo(ptr);
+			break;
+		case INTRO_STATE:
+			RemoveThread(ptr);
+			ReMoveClientInfo(ptr);
+			break;
+		case FILE_TRANS_INFO_STATE:
+			printf("파일수신거부!!\n");
+			WakeUpWaitClient(ptr);
+			RemoveThread(ptr);
+			ReMoveClientInfo(ptr);
+			break;
+		case FILE_TRANS_DATA_STATE:
+			WakeUpWaitClient(ptr);
+			RemoveThread(ptr);
+			ReMoveClientInfo(ptr);
+			break;
+		case FILE_TRANS_WAIT_STATE:	
+			WakeUpWaitClient(ptr);
+			RemoveThread(ptr);
+			ReMoveClientInfo(ptr);
+			break;
+		case FILE_TRANS_END_STATE:
+			WakeUpWaitClient(ptr);
+			RemoveThread(ptr);
+			ReMoveClientInfo(ptr);
+			break;	
+		case DISCONNETED_STATE:
+			WakeUpWaitClient(ptr);
+			RemoveThread(ptr);
+			ReMoveClientInfo(ptr);
+			break;
+		}
+		LeaveCriticalSection(&cs);
+
+	}
+
+	return 0;
+}
+
+void WakeUpWaitClient(_ClientInfo* _ptr)
+{
+	int i = 0;
+	int size;
+	int retval;
+	EnterCriticalSection(&cs);
+	for (i = 0; i < Count; i++)
+	{
+		if (ClientInfo[i]->state == FILE_TRANS_WAIT_STATE)
+		{
+			if (!strcmp(_ptr->file_info.filename, ClientInfo[i]->file_info.filename))
+			{
+				SetEvent(ClientInfo[i]->hwait_event);
+				break;
+			}
+		}
+	}
+
+	LeaveCriticalSection(&cs);
+}
+// 소켓 함수 오류 출력 후 종료
+void err_quit(const char *msg)
+{
+	LPVOID lpMsgBuf;
+	FormatMessage(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER |
+		FORMAT_MESSAGE_FROM_SYSTEM,
+		nullptr, WSAGetLastError(),
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPTSTR)&lpMsgBuf, 0, nullptr);
+	MessageBox(nullptr, (LPCTSTR)lpMsgBuf, msg, MB_ICONERROR);
+	LocalFree(lpMsgBuf);
+	exit(-1);
+}
+
+// 소켓 함수 오류 출력
+void err_display(const char *msg)
+{
+	LPVOID lpMsgBuf;
+	FormatMessage(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER |
+		FORMAT_MESSAGE_FROM_SYSTEM,
+		nullptr, WSAGetLastError(),
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPTSTR)&lpMsgBuf, 0, nullptr);
+	printf("[%s] %s", msg, (LPCTSTR)lpMsgBuf);
+	LocalFree(lpMsgBuf);
+}
+
+
+_ClientInfo* AddClientInfo(SOCKET sock, SOCKADDR_IN addr)
+{
+	EnterCriticalSection(&cs);
+
+	_ClientInfo* ptr = new _ClientInfo;
+	ZeroMemory(ptr, sizeof(_ClientInfo));
+	ptr->sock = sock;
+	memcpy(&ptr->addr, &addr, sizeof(addr));
+	ptr->state = INIT_STATE;
+	ptr->hwait_event = CreateEvent(nullptr, false, false, nullptr);
+	ptr->hthread = nullptr;
+	ptr->file_trans = false;
+	ClientInfo[Count++] = ptr;
+
+
+	printf("\nFileSender 접속: IP 주소=%s, 포트 번호=%d\n",
+		inet_ntoa(ptr->addr.sin_addr), ntohs(ptr->addr.sin_port));
+	
+	LeaveCriticalSection(&cs);
+	return ptr;
+}
+
+void ReMoveClientInfo(_ClientInfo* ptr)
+{
+	EnterCriticalSection(&cs);
+	
+	printf("FileSender 종료: IP 주소=%s, 포트 번호=%d\n",
+		inet_ntoa(ptr->addr.sin_addr), ntohs(ptr->addr.sin_port));
+
+	for (int i = 0; i<Count; i++)
+	{
+		if (ClientInfo[i] == ptr)
+		{
+			closesocket(ptr->sock);
+			CloseHandle(ptr->hwait_event);
+
+			delete ptr;
+			for (int j = i; j<Count - 1; j++)
+			{
+				ClientInfo[j] = ClientInfo[j + 1];
+			}
+			break;
+		}
+	}
+
+
+	ClientInfo[Count] = nullptr;
+
+	Count--;
+
+	LeaveCriticalSection(&cs);
+}
+
+bool SearchFile(const char *filename)
+{
+	WIN32_FIND_DATA FindFileData;
+	HANDLE hFindFile = FindFirstFile(filename, &FindFileData);
+	if (hFindFile == INVALID_HANDLE_VALUE)
+		return false;
+	else {
+		FindClose(hFindFile);
+		return true;
+	}	
+}
+
+bool AddThread(LPTHREAD_START_ROUTINE process, _ClientInfo* _ptr)
+{
+	EnterCriticalSection(&cs);
+	_ptr->hthread = CreateThread(nullptr, 0, process, _ptr, 0, nullptr);
+	if (_ptr->hthread == nullptr)
+	{
+		LeaveCriticalSection(&cs);
+		return false;
+	}
+
+	hThread[ThreadCount++] = _ptr->hthread;
+
+	LeaveCriticalSection(&cs);
+
+	return true;
+}
+
+void RemoveThread(_ClientInfo* _ptr)
+{
+	EnterCriticalSection(&cs);
+
+	for (int i = 1; i < ThreadCount; i++)
+	{
+		if (hThread[i] == _ptr->hthread)
+		{
+			CloseHandle(_ptr->hthread);
+			_ptr->hthread = nullptr;
+
+			for (int j = i; j < ThreadCount - 1; j++)
+			{
+				hThread[j] = hThread[j + 1];
+			}
+			break;
+		}
+
+	}
+
+	hThread[ThreadCount - 1] = nullptr;
+	ThreadCount--;
+
+	LeaveCriticalSection(&cs);
+}
+
+
+_ClientInfo* SearchClientInfo(char* _filename)
+{
+	EnterCriticalSection(&cs);
+	for (int i = 0; i < Count; i++)
+	{
+		if (ClientInfo[i]->file_trans && !strcmp(ClientInfo[i]->file_info.filename, _filename))
+		{
+			LeaveCriticalSection(&cs);
+			return ClientInfo[i];
+		}
+	}
+	LeaveCriticalSection(&cs);
+	return nullptr;
+}
+
+_ClientInfo* SearchClientInfo(HANDLE _hThread)
+{
+	EnterCriticalSection(&cs);
+	for (int i = 0; i < Count; i++)
+	{
+		HANDLE h = ClientInfo[i]->hthread;
+		if (ClientInfo[i]->hthread == _hThread)
+		{
+			LeaveCriticalSection(&cs);
+			return ClientInfo[i];
+		}
+	}
+
+	LeaveCriticalSection(&cs);
+	return nullptr;
+
+}
+
+_ClientInfo* SearchClientInfo(SOCKET _sock)
+{
+	EnterCriticalSection(&cs);
+	for (int i = 0; i < Count; i++)
+	{
+		if (ClientInfo[i]->sock == _sock)
+		{
+			LeaveCriticalSection(&cs);
+			return ClientInfo[i];
+		}
+	}
+	LeaveCriticalSection(&cs);
+	return nullptr;
+}
+
+// 사용자 정의 데이터 수신 함수
+int recvn(SOCKET s, char *buf, int len, int flags)
+{
+	int received;
+	char *ptr = buf;
+	int left = len;
+
+	while (left > 0) {
+		received = recv(s, ptr, left, flags);
+		if (received == SOCKET_ERROR)
+			return SOCKET_ERROR;
+		else if (received == 0)
+			break;
+		left -= received;
+		ptr += received;
+	}
+
+	return (len - left);
+}
+
+bool PacketRecv(SOCKET _sock, char* _buf)
+{
+	int size;
+
+	int retval = recvn(_sock, (char*)&size, sizeof(size), 0);
+	if (retval == SOCKET_ERROR)
+	{
+		err_display("gvalue recv error()");
+		return false;
+	}
+	else if (retval == 0)
+	{
+		return false;
+	}
+
+	retval = recvn(_sock, _buf, size, 0);
+	if (retval == SOCKET_ERROR)
+	{
+		err_display("gvalue recv error()");
+		return false;
+
+	}
+	else if (retval == 0)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+int PackPacket(char* _buf, PROTOCOL  _protocol, const char* _str) //인트로 
+{
+	char* ptr = _buf;
+	int strsize = strlen(_str);
+	int size = 0;
+
+	ptr = ptr + sizeof(size);
+
+	memcpy(ptr, &_protocol, sizeof(_protocol));
+	ptr = ptr + sizeof(_protocol);
+	size = size + sizeof(_protocol);
+
+	
+	memcpy(ptr, &strsize, sizeof(strsize));
+	ptr = ptr + sizeof(strsize);
+	size = size + sizeof(strsize);
+
+	memcpy(ptr, _str, strsize);
+	ptr = ptr + strsize;
+	size = size + strsize;
+
+	ptr = _buf;
+	memcpy(ptr, &size, sizeof(size));
+
+	size = size + sizeof(size);
+	return size;
+}
+
+int PackPacket(char* _buf, PROTOCOL  _protocol, int _data, const char* _str) //파일전송 거부 정보
+{
+	char* ptr = _buf;
+	int strsize = strlen(_str);
+	int size = 0;
+
+	ptr = ptr + sizeof(size);
+
+	memcpy(ptr, &_protocol, sizeof(_protocol));
+	ptr = ptr + sizeof(_protocol);
+	size = size + sizeof(_protocol);
+
+	memcpy(ptr, &_data, sizeof(_data));
+	ptr = ptr + sizeof(_data);
+	size = size + sizeof(_data);
+
+	memcpy(ptr, &strsize, sizeof(strsize));
+	ptr = ptr + sizeof(strsize);
+	size = size + sizeof(strsize);
+
+	memcpy(ptr, _str, strsize);
+	ptr = ptr + strsize;
+	size = size + strsize;
+
+	ptr = _buf;
+	memcpy(ptr, &size, sizeof(size));
+
+	size = size + sizeof(size);
+	return size;
+}
+
+
+int PackPacket(char* _buf, PROTOCOL _protocol, int _data)//파일 전송 위치 정보
+{
+	char* ptr = _buf;
+	int size = 0;
+	
+	ptr = ptr + sizeof(size);
+	
+	memcpy(ptr, &_protocol, sizeof(_protocol));
+	ptr = ptr + sizeof(_protocol);
+	size = size + sizeof(_protocol);
+
+	memcpy(ptr, &_data, sizeof(_data));
+	ptr = ptr + sizeof(_data);
+	size = size + sizeof(_data);
+
+	ptr = _buf;
+	memcpy(ptr, &size, sizeof(size));
+
+	size = size + sizeof(size);
+	return size;
+}
+
+PROTOCOL GetProtocol(const char* _buf)
+{
+	PROTOCOL protocol;
+	memcpy(&protocol, _buf, sizeof(PROTOCOL));
+	return protocol;
+}
+
+void UnPackPacket(const char* _buf, char* _str1, int& _data1)//파일이름 & 파일 크기
+{
+	const char* ptr = _buf + sizeof(PROTOCOL);
+	int strsize;
+
+	memcpy(&strsize, ptr, sizeof(strsize));
+	ptr = ptr + sizeof(strsize);
+
+	memcpy(_str1, ptr, strsize);
+	ptr = ptr + strsize;
+
+	memcpy(&_data1, ptr, sizeof(_data1));
+	ptr = ptr + sizeof(_data1);	
+}
+
+void UnPackPacket(const char* _buf, int& _size, char* _targetbuf) //파일 전송 데이터
+{
+	const char* ptr = _buf + sizeof(PROTOCOL);
+
+	memcpy(&_size, ptr, sizeof(_size));
+	ptr = ptr + sizeof(_size);
+
+	memcpy(_targetbuf, ptr, _size);
+}
